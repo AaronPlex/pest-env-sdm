@@ -1,0 +1,129 @@
+---
+title: "Geographic distribution of Ralstonia solanacearum phylotype II sequevar 1 based on environmental variables"
+author: "Aaron I. Plex Sulá"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Loading all libraries required
+
+```{r}
+library(terra)
+library(predicts)
+library(rJava)
+library(viridis)
+library(RColorBrewer)
+```
+
+
+## Training the model based on Maxent
+```{r}
+# Predictor variables
+e <- ext(-179, 179, -59, 83) #left, right, bottom, top
+#r <- rast(res=1/48, ext=e) #an empty raster
+fl.ext<-c(-90, -75, 24, 36)
+
+biosoil<-rast("C:/Users/plexaaron/UFL Dropbox/Aaron Plex Sula/168/2022/2022 Projects/Pathogen biogeography/Model validation/biosoilvar.tif")
+env.fl<-crop(biosoil, fl.ext)
+biosoil<-aggregate(biosoil, fact = 20, fun = mean, na.rm=TRUE)
+
+# Geographic coordinates of occurrences
+geo.presence <- read.csv("C:/Users/plexaaron/UFL Dropbox/Aaron Plex Sula/168/2022/2022 Projects/Pathogen biogeography/Model validation/Ralstonia solanacearum/Ralstonia_Global_Diversity_Current_7_29.csv")
+## Focusing the analysis on sequevar 1 (Ralstonia solanacearum race 3 biovar 2)
+geo.presence<-geo.presence[geo.presence$Sequevar == "1",]
+## Focusing the analysis on sub-national occurrences and unique geographic coordinates
+countries <- unique(geo.presence$Location..Country.or.Territory.)
+geo.presence <- geo.presence[!geo.presence$Location.Isolated %in% countries,]
+geo.presence <- geo.presence[, c("Latitude", "Longitude")]
+geo.presence <- geo.presence[!duplicated(geo.presence[, c("Longitude", "Latitude")]), ]
+
+plot(geo.presence$Longitude, geo.presence$Latitude, 
+     xlab = "Longitude", ylab = "Latitude",
+     main = "Occurrence of RS sequevar 1")
+
+#vectorPresence<-vect(geo.presence, 
+#                 crs="+proj=longlat", geom=c("Longitude","Latitude"))
+#vectorPresence<-crop(vectorPresence, e)
+vectorPresence <- vect(geo.presence, geom = c("Longitude", "Latitude"),
+                       crs  = "EPSG:4326")
+writeVector(vectorPresence, filename = "RSIIB1_occurrences.shp", overwrite = TRUE)
+
+# Building the maxent model
+ks<-ifelse(length(geo.presence$Latitude)<=150, 5, 
+           ifelse(length(geo.presence$Latitude)<1500, 10,
+                  ifelse(length(geo.presence$Latitude)<2000, 15, 20)))
+fold<-folds(vectorPresence, k = ks)
+occ.test<-vectorPresence[fold == 1,]
+occ.train<-vectorPresence[fold != 1,]
+background.points<-40*dim(vectorPresence)[1] #Check that there are at least 8,000 background points
+
+maxent.model<-MaxEnt(biosoil[[1:10]], occ.train, nbg = background.points,
+                     removeDuplicates = FALSE, silent = TRUE)
+plot(maxent.model) #plot of the importance of variables
+
+par(mfrow = c(3,2))
+hist(maxent.model@presence$Isothermality, xlab = "Isothermality", main = "")
+hist(maxent.model@presence$AM_Temperature, xlab = "Annual mean temperature", main = "")
+hist(maxent.model@presence$Precipitation_seasonality, xlab = "Precipitation seasonality", main = "")
+hist(maxent.model@presence$Annual_precipitation, xlab = "Annual precipitation", main = "")
+hist(maxent.model@presence$MDiurnal_Range, xlab = "Mean diurnal temperature range", main = "")
+```
+
+
+## Predicting distribution based on climate similarity
+```{r fig.width=10, fig.height=6}
+logistic.map<-predict(maxent.model, biosoil, args=c("outputformat=logistic"))
+logistic.fl<-predict(maxent.model, env.fl, args=c("outputformat=logistic"))
+writeRaster(logistic.fl, "RSIIB1-Maxent-FL.tif", overwrite = TRUE)
+vir.pal<-viridis(n=100, option = "viridis")
+
+par(mfrow = c(2,2))
+plot(vectorPresence, col = vir.pal, main = "Observed distribution")
+plot(logistic.map, col = vir.pal, main = "Predicted distribution")
+plot(logistic.map, col = vir.pal, main = "Training dataset")
+points(occ.train, col = "grey60")
+plot(logistic.map, col = vir.pal, main = "Test dataset")
+points(occ.test, col = "red")
+```
+
+# Contemporary risk scenario
+```{r fig.width=10, fig.height=6}
+map_grey_background <- rast("C:/Users/plexaaron/UFL Dropbox/Aaron Plex Sula/168/2022/2022 Projects/Pathogen biogeography/Predictor variables/map_grey_background.tif")
+map_grey_background <- project(map_grey_background,
+                               "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+
+logistic.map<-project(logistic.map, "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+myPalette2 <- colorRampPalette(rev(brewer.pal(11, "Spectral")),space="Lab")
+
+plot(map_grey_background, col = "grey75",  xaxt='n',  yaxt='n', axes=F, box=F, legend = F, main = "Projected risk in 2010")
+plot(logistic.map^(1/2), col=myPalette2(100), xaxt = 'n', yaxt = 'n', axes = F, box = F, add = T, legend = T, plg = list(loc = "bottom", horizontal = TRUE))
+writeRaster(logistic.map, "RSIIB1MaxENT.tif", overwrite=TRUE)
+```
+
+
+# Climate change scenario
+```{r fig.width=10, fig.height=6}
+future.climate<-geodata::cmip6_world(model = "ACCESS-ESM1-5", ssp = "585", time = "2061-2080", var = "bioc", res = 10, path = tempdir())
+future.climate<-crop(future.climate, e)
+future.climate<-list(future.climate$bio01, future.climate$bio02, future.climate$bio03, future.climate$bio12, future.climate$bio15, biosoil$`sand_15-30cm`, biosoil$`phh2o_15-30cm`,biosoil$`clay_15-30cm`,biosoil$`silt_15-30cm`,biosoil$`soc_15-30cm`,biosoil$travel_time_to_cities_1,biosoil$travel_time_to_ports_1)
+future.climate<-terra::rast(future.climate)
+names(future.climate)<-names(biosoil)
+
+future.logimap<-predict(maxent.model, future.climate, args=c("outputformat=logistic"))
+future.logimap<-project(future.logimap, "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+
+plot(map_grey_background, col = "grey75",  xaxt='n',  yaxt='n', axes=F, box=F, legend = F, main = "Projected risk in 2061-2080")
+plot(future.logimap^(1/2), col=myPalette2(100), xaxt = 'n', yaxt = 'n', axes = F, box = F, add = T, legend = T, plg = list(loc = "bottom", horizontal = TRUE))
+
+vir.diff<-viridis(n=100, option = "cividis")
+diff.map<-(future.logimap - logistic.map) * 100
+
+plot(map_grey_background, col = "grey75",  xaxt='n',  yaxt='n', axes=F, box=F, legend = F, main = "% change in projected risk")
+plot(diff.map, col=vir.diff, xaxt = 'n', yaxt = 'n', axes = F, box = F, add = T, legend = T, plg = list(loc = "bottom", horizontal = TRUE))
+```
+

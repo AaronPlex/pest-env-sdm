@@ -1,0 +1,259 @@
+---
+title: "Projecting the potential geographic distribution of Ralstonia solanacearum phylotype II sequevar 1 based on environmental variables"
+author: "Aaron I. Plex Sulá"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading all libraries required
+
+```{r}
+library(terra)
+library(predicts)
+library(viridis)
+library(RColorBrewer)
+
+myPalette2 <- colorRampPalette(rev(brewer.pal(11, "Spectral")),space="Lab")
+```
+
+## Training the models and predicting
+```{r message=FALSE}
+# Predictor variables
+e <- ext(-179, 179, -59, 83) #left, right, bottom, top
+biosoil<-rast("C:/Users/plexaaron/UFL Dropbox/Aaron Plex Sula/168/2022/2022 Projects/Pathogen biogeography/Model validation/biosoilvar.tif")
+biosoil<-biosoil[[1:10]]
+
+# Geographic coordinates of occurrences
+geo.presence <- read.csv("C:/Users/plexaaron/UFL Dropbox/Aaron Plex Sula/168/2022/2022 Projects/Pathogen biogeography/Model validation/Ralstonia solanacearum/Ralstonia_Global_Diversity_Current_7_29.csv")
+## Focusing the analysis on sequevar 1 (Ralstonia solanacearum race 3 biovar 2)
+geo.presence<-geo.presence[geo.presence$Sequevar == "1",]
+## Focusing the analysis on sub-national occurrences and unique geographic coordinates
+countries <- unique(geo.presence$Location..Country.or.Territory.)
+geo.presence<-geo.presence[!geo.presence$Location.Isolated %in% countries,]
+geo.presence<-geo.presence[,c("Longitude","Latitude")]
+geo.presence <- geo.presence[!duplicated(geo.presence[, c("Longitude", "Latitude")]), ]
+
+colnames(geo.presence)<-c("x","y")
+vectorPresence<-vect(geo.presence, 
+                 crs="+proj=longlat", geom=c("x","y"))
+vectorPresence<-crop(vectorPresence, e)
+training.bios<-terra::extract(biosoil, vectorPresence)
+training.bios<-cbind(geo.presence, training.bios[,-1])
+#training.bio <- training.bio[which(is.na(training.bio$) != TRUE),]
+training.bios$pb<-1
+
+#Generating background points as pseudo-absence
+biosoil<-aggregate(biosoil, fact = 20, fun = mean, na.rm=TRUE)
+cells <- terra::extract(biosoil, vectorPresence, cells = T)$cell
+mask <- biosoil[[1]] * 0
+mask[cells] <- NA
+background <- terra::as.data.frame(mask, xy = T)
+background <- dplyr::sample_n(background, size = dim(vectorPresence)[1]*5, replace = FALSE)
+vecBackground <- vect(background[,c(1,2)], 
+                 crs="+proj=longlat", geom=c("y","x"))
+background <- cbind(background[,c(1,2)], extract(biosoil, vecBackground)[,-1])
+background <- background[which(is.na(background$AM_Temperature)==FALSE),]
+background <- background[which(is.na(background$`sand_15-30cm`)==FALSE),]
+background$pb <- 0
+
+training.data <- rbind(training.bios, background)
+sum(is.na(training.data))
+training.data <- training.data[which(is.na(training.data$`soc_15-30cm`)==FALSE),]
+#training.data <- training.data[which(is.na(training.data$travel_time_to_ports_1)==FALSE),]
+sum(is.na(training.data))
+
+training.data<-training.data[,-1]
+training.data<-training.data[,-1]
+colnames(training.data)<-c("AM_Temperature","MDiurnal_Range", "Isothermality",
+                           "Annual_precipitation","Precipitation_seasonality",
+                           "sand","ph","clay","silt","soc","pb")
+
+# A dataset for predictions
+AM_Temperature<-as.vector(values(biosoil$AM_Temperature))
+MDiurnal_Range<-as.vector(values(biosoil$MDiurnal_Range))
+Isothermality<-as.vector(values(biosoil$Isothermality))
+Annual_precipitation<-as.vector(values(biosoil$Annual_precipitation))
+Precipitation_seasonality<-as.vector(values(biosoil$Precipitation_seasonality))
+sand<-as.vector(values(biosoil$`sand_15-30cm`))
+ph<-as.vector(values(biosoil$`phh2o_15-30cm`))
+clay<-as.vector(values(biosoil$`clay_15-30cm`))
+silt<-as.vector(values(biosoil$`silt_15-30cm`))
+soc<-as.vector(values(biosoil$`soc_15-30cm`))
+
+new.data<-cbind(AM_Temperature, MDiurnal_Range, Isothermality, Annual_precipitation,
+                Precipitation_seasonality,sand, ph, clay, silt, soc)
+new.data<-as.data.frame(new.data)
+colnames(new.data)<-c("AM_Temperature","MDiurnal_Range", "Isothermality",
+                           "Annual_precipitation","Precipitation_seasonality",
+                           "sand","ph","clay","silt","soc")
+non.missing<-which(is.na(rowSums(new.data))==FALSE)
+```
+
+
+# Training the random forest model
+```{r warning=FALSE, message=FALSE}
+#Training the random forest model
+library(mlr) ##UPDATE TO mlr3
+pathoTask<-makeRegrTask(data = training.data, target = "pb")
+kFold<-makeResampleDesc("CV", iters = 10)
+forest<-makeLearner("regr.randomForest")
+forestParamSpace<-makeParamSet(
+  makeIntegerParam("ntree", lower = 100, upper = 100), #trees in the forest > better
+  makeIntegerParam("mtry", lower = 2, upper = 10), #features to randomly sample at each node
+  makeIntegerParam("nodesize", lower = 5, upper = 100), #minimum cases in a leaf (think about the # occurrences in the dataset)
+  makeIntegerParam("maxnodes", lower = 5, upper = 30) #maximum leaves allowed (fewer nodes means more strict)
+)
+
+randSearch<-makeTuneControlRandom(maxit = 1000)
+
+tunedForestPars <- tuneParams(forest, task = pathoTask,
+                              resampling = kFold,
+                              par.set = forestParamSpace,
+                              control = randSearch)
+tunedForestPars
+
+tunedForest <- setHyperPars(forest, par.vals = tunedForestPars$x)
+tunedForestModel <- train(tunedForest, pathoTask)
+forestModelData <- getLearnerModel(tunedForestModel)
+plot(forestModelData)
+
+#outer cross-validation to evaluate how well the model performs
+#outCV <- makeResampleDesc("CV", iters = 5)
+#forestWrapper <- makeTuneWrapper("regr.randomForest",
+#                                 resampling = kFold,
+#                                 par.set = forestParamSpace,
+#                                 control = randSearch)
+#cvWithTuning <- resample(forestWrapper, roreriTask, resampling = outCV)
+#cvWithTuning
+
+# Predictions based on the trained random forest model
+predictions<-predict(tunedForestModel, newdata = new.data[non.missing,])
+predictions<-predictions$data$response
+predictions<-ifelse(predictions>0, predictions, 0)
+new.data$pred<-NaN
+new.data$pred[non.missing]<-predictions
+hist(predictions)
+sum(predictions>0)
+sum(predictions>0)/length(predictions)
+```
+
+
+# Potential geographic distribution informed by a random forest
+```{r fig.height=6, fig.width=10, message=FALSE}
+predicted.distribution<-biosoil$AM_Temperature
+values(predicted.distribution)<-new.data$pred
+names(predicted.distribution)<-"predictedRSIIBRandomForest"
+
+map_grey_background <- rast("C:/Users/plexaaron/UFL Dropbox/Aaron Plex Sula/168/2022/2022 Projects/Pathogen biogeography/Predictor variables/map_grey_background.tif")
+map_grey_background <- project(map_grey_background,
+                               "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+predicted.distribution<-project(predicted.distribution, "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+
+plot(map_grey_background, col = "grey75",  xaxt='n',  yaxt='n', axes=F, box=F, legend = F, main = "Predicted distribution based on random forest")
+plot(predicted.distribution, col=myPalette2(100), xaxt = 'n', yaxt = 'n', axes = F, box = F, add = T, legend = T, plg = list(loc = "bottom", horizontal = TRUE))
+```
+
+
+# Training the XGBoost model
+```{r warning=FALSE, message=FALSE}
+xgb <- makeLearner("regr.xgboost")
+xgbParamSpace <- makeParamSet(
+  makeNumericParam("eta", lower = 0, upper = 1), #learning rate
+  makeNumericParam("gamma", lower = 0, upper = 10), # minimum amount of splitting by which a node must improve the predictions
+  makeIntegerParam("max_depth", lower = 1, upper = 20), #maximum depth of trees
+  makeNumericParam("min_child_weight", lower = 1, upper = 10), #degree of impurity
+  makeNumericParam("subsample", lower = 0, upper = 1), #proportion of sampling cases or occurrences
+  makeNumericParam("colsample_bytree", lower = 0.2, upper = 1), #proportion of predictor variables sampled for each tree
+  makeIntegerParam("nrounds", lower = 50, upper = 50) #the number of sequentially built trees in the model
+)
+tunedXgbPars <- tuneParams(xgb, task = pathoTask,
+                           resampling = kFold,
+                           par.set = xgbParamSpace,
+                           control = randSearch)
+tunedXgbPars
+
+tunedXgb <- setHyperPars(xgb, par.vals = tunedXgbPars$x)
+tunedXgbModel <- train(tunedXgb, pathoTask)
+xgbModelData <- getLearnerModel(tunedXgbModel)
+
+library(ggplot2)
+ggplot(data = xgbModelData$evaluation_log, aes(xgbModelData$evaluation_log$iter, xgbModelData$evaluation_log$train_rmse))+
+  geom_line()+
+  geom_point()+
+  theme_bw()+
+  labs(x="Iterations", y="Train rmse")
+```
+
+# Projected potential geographic distribution informed by gradient boosting (XGboost)
+```{r fig.height=6, fig.width=10, warning=FALSE}
+xgbpredictions<-predict(tunedXgbModel, newdata = new.data[non.missing,1:10])
+xgbpredictions<-xgbpredictions$data$response
+new.data$xgbpred<-NaN
+new.data$xgbpred[non.missing]<-xgbpredictions
+hist(xgbpredictions)
+sum(xgbpredictions>0)
+sum(xgbpredictions>0)/length(predictions)
+
+xgbpredicted.distribution<-biosoil$AM_Temperature
+values(xgbpredicted.distribution)<-new.data$xgbpred
+names(xgbpredicted.distribution)<-"predictedRSIIBXGBoost"
+xgbpredicted.distribution<-project(xgbpredicted.distribution, "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+
+plot(map_grey_background, col = "grey75",  xaxt='n',  yaxt='n', axes=F, box=F, legend = F, main = "Predicted distribution based on XGBoost")
+plot(xgbpredicted.distribution, col=myPalette2(100), xaxt = 'n', yaxt = 'n', axes = F, box = F, add = T, legend = T, plg = list(loc = "bottom", horizontal = TRUE))
+```
+
+
+
+# Training the logistic regression model
+```{r warning=FALSE, message=FALSE}
+training.data$pb<-as.factor(training.data$pb)
+pathoTasklog<-makeClassifTask(data = training.data, target = "pb")
+logReg<-makeLearner("classif.logreg", predict.type = "prob")
+logRegModel<-train(logReg, pathoTasklog)
+
+logRegWrapper <- makeImputeWrapper("classif.logreg",
+                                   cols = list(sand = imputeMean()))
+kFold <- makeResampleDesc(method = "RepCV", folds = 10, reps = 200, 
+                          stratify = TRUE)
+logRegwithImpute <- resample(logRegWrapper, pathoTasklog,
+                             resampling = kFold,
+                             measures = list(acc, fpr, fnr))
+logRegwithImpute
+logRegModelData<-getLearnerModel(logRegModel)
+coef(logRegModelData)
+
+#calculating odds ratios
+exp(cbind(Odds_Ration = coef(logRegModelData), confint(logRegModelData)))
+```
+
+
+# Projecting geographic distribution based on logistic regression
+```{r fig.height=6, fig.width=10, warning=FALSE}
+logPredictions <- predict(logRegModel, newdata = new.data[non.missing,])
+logPredictions<-logPredictions$data$prob.1
+new.data$logpred<-NaN
+new.data$logpred[non.missing]<-logPredictions
+
+logpredicted.distribution<-biosoil$AM_Temperature
+values(logpredicted.distribution)<-new.data$logpred
+names(logpredicted.distribution)<-"predictedRSIIBLogistic"
+logpredicted.distribution<-project(logpredicted.distribution, "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+
+plot(map_grey_background, col = "grey75",  xaxt='n',  yaxt='n', axes=F, box=F, legend = F, main = "Predicted distribution based on logistic regression")
+plot(logpredicted.distribution, col=myPalette2(100), xaxt = 'n', yaxt = 'n', axes = F, box = F, add = T, legend = T, plg = list(loc = "bottom", horizontal = TRUE))
+```
+
+
+Saving outcomes in raster format
+```{r}
+geopredictions<-list(predicted.distribution, xgbpredicted.distribution, logpredicted.distribution)
+geopredictions<-rast(geopredictions)
+names(geopredictions)<-c("RSIIB1RandomForest","RSIIB1XGBoost","RSIIB1Logistic")
+writeRaster(geopredictions, "RSIIB1Projections.tif", overwrite=TRUE)
+```
+

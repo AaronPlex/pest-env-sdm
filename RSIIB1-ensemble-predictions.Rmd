@@ -1,0 +1,154 @@
+---
+title: "Geographic distribution of RSIIB1 based on ensembled predictions"
+author: "Aaron I. Plex Sulá"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(terra)
+library(RColorBrewer)
+library(rnaturalearth)
+library(rnaturalearthdata)
+
+beauty.palette <- colorRampPalette(rev(brewer.pal(11, "Spectral")),space="Lab")
+
+RSIIB1.projections<-rast("RSIIB1Projections.tif")
+RSIIB1.Maxent<-rast("RSIIB1MaxENT.tif")
+RSIIB1.Maxent<-RSIIB1.Maxent#^(1/2)
+RSIIB1.projections<-list(RSIIB1.projections, RSIIB1.Maxent)
+RSIIB1.projections<-terra::rast(RSIIB1.projections)
+ensemble.RSIIB1<-mean(RSIIB1.projections[[c(1,2,3,4)]])
+writeRaster(ensemble.RSIIB1,"RSIIB-1-ensemble.tif",overwrite=TRUE)
+
+countries <- vect(ne_countries(scale = "medium", returnclass = "sf"))
+countries <- project(countries, crs(ensemble.RSIIB1))
+
+oceans <- vect(ne_download(scale = "medium", type = "ocean", category = "physical", returnclass = "sf"))
+oceans <- project(oceans, crs(ensemble.RSIIB1))
+
+lakes <- vect(ne_download(scale = "medium", type = "lakes", category = "physical", returnclass = "sf"))
+lakes <- project(lakes, crs(ensemble.RSIIB1))
+
+geo.presence <- read.csv("C:/Users/plexaaron/UFL Dropbox/Aaron Plex Sula/168/2022/2022 Projects/Pathogen biogeography/Model validation/Ralstonia solanacearum/Ralstonia_Global_Diversity_Current_7_29.csv")
+geo.presence<-geo.presence[geo.presence$Sequevar == "1",]
+ncountries <- unique(geo.presence$Location..Country.or.Territory.)
+geo.presence <- geo.presence[!geo.presence$Location.Isolated %in% ncountries,]
+geo.presence <- geo.presence[, c("Latitude", "Longitude")]
+geo.presence <- geo.presence[!duplicated(geo.presence[, c("Longitude", "Latitude")]), ]
+vectorPresence<-vect(geo.presence, 
+                 crs="+proj=longlat", geom=c("Longitude","Latitude"))
+vectorPresence<-project(vectorPresence, crs(ensemble.RSIIB1))
+```
+
+
+```{r fig.height=5, fig.width=8, dpi=250}
+plot(countries, col = "grey5",  xaxt='n',  yaxt='n', axes=F, box=F, legend = F, border = NA, 
+     main = "Ralstonia solanacearum phylotype IIB1 (RSIIB1, n = 151)")
+plot(oceans, col = "lightblue", border = NA, add = T)
+plot(RSIIB1.Maxent^(2/3), col=beauty.palette(100), xaxt = 'n', yaxt = 'n', axes = F, box = F, add = T, legend = T, 
+     plg = list(loc = "bottom", horizontal = TRUE, cex = 1.5))
+plot(lakes, col = "lightblue", border = NA, add = T)
+plot(countries, add = T, border = "grey50", lwd = 0.5)
+plot(vectorPresence, pch = 0, cex = 0.6, col = "grey35", add = TRUE)
+```
+
+## Invasion risk based on rivers
+
+River data from HydroATLAS (https://www.hydrosheds.org/hydroatlas)
+hydrological connectivity
+
+```{r fig.height=5, fig.width=8, dpi=250}
+rivers<-rast("global-mean-rivers01.tif")
+rivers<-project(rivers, crs(ensemble.RSIIB1))
+rivers<-resample(rivers, ensemble.RSIIB1, method = "bilinear")
+rivers.climate <- (rivers^0.05) * (ensemble.RSIIB1^0.75)
+
+plot(countries, col = "grey5",  xaxt='n',  yaxt='n', axes=F, box=F, legend = F, border = NA, 
+     main = "Mean discharge of all rivers")
+plot(oceans, col = "lightblue", border = NA, add = T)
+plot(rivers^0.15, col=beauty.palette(100), xaxt = 'n', yaxt = 'n', axes = F, box = F, add = T, legend = T, 
+     plg = list(loc = "bottom", horizontal = TRUE, cex = 1.5))
+plot(lakes, col = "lightblue", border = NA, add = T)
+plot(countries, add = T, border = "grey50", lwd = 0.5)
+
+plot(countries, col = "grey5",  xaxt='n',  yaxt='n', axes=F, box=F, legend = F, border = NA, 
+     main = "Ralstonia solanacearum phylotype IIB1 (RSIIB1, n = 151)")
+plot(oceans, col = "lightblue", border = NA, add = T)
+plot(rivers.climate, col=beauty.palette(100), xaxt = 'n', yaxt = 'n', axes = F, box = F, add = T, legend = T, 
+     plg = list(loc = "bottom", horizontal = TRUE, cex = 1.5))
+plot(lakes, col = "lightblue", border = NA, add = T)
+plot(countries, add = T, border = "grey50", lwd = 0.5)
+plot(vectorPresence, pch = 0, cex = 0.6, col = "grey35", add = TRUE)
+```
+
+
+## Temperature tolerance model
+
+```{r fig.height=5, fig.width=8, dpi=250}
+temp1<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_01_2019_V.2.1.tif")
+temp2<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_02_2019_V.2.1.tif")
+temp3<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_03_2019_V.2.1.tif")
+temp4<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_04_2019_V.2.1.tif")
+temp5<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_05_2019_V.2.1.tif")
+temp6<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_06_2019_V.2.1.tif")
+temp7<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_07_2019_V.2.1.tif")
+temp8<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_08_2019_V.2.1.tif")
+temp9<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_09_2019_V.2.1.tif")
+temp10<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_10_2019_V.2.1.tif")
+temp11<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_11_2019_V.2.1.tif")
+temp12<-rast("https://os.zhdk.cloud.switch.ch/chelsav2/GLOBAL/monthly/tas/CHELSA_tas_12_2019_V.2.1.tif")
+
+temperature<-list(temp1, temp2, temp3, temp4, temp5, temp6,
+                  temp7, temp8, temp9, temp10, temp11, temp12)
+temperature<-rast(temperature)
+temperature<-aggregate(temperature, fact = 20, fun = mean, na.rm=TRUE)
+values(temperature)<-values(temperature)/10-273.15
+
+# Minimum temperature tolerance
+Tmin<-10
+# Maximum temperature tolerance
+Tmax<-40
+# Optimum temperature
+Topt<-(20+28)/2
+# Infection risk based on a beta distribution model
+#factor1 <- (Tmax-temperature)/(Tmax-Topt)
+#factor2 <- ((temperature-Tmin)/(Topt-Tmin))^((Topt-Tmin)/(Tmax-Topt))
+#infection.risk <- factor1 * factor2 * ensemble.RSIIB1 * 1.190277
+values(temperature) <- (Tmax-values(temperature))/(Tmax-Topt) * ((values(temperature)-Tmin)/(Topt-Tmin))^((Topt-Tmin)/(Tmax-Topt))
+global.ext <- ext(-179, 179, -59, 83)
+temperature <- crop(temperature, global.ext)
+
+infection.risk1 <- sum(temperature, na.rm = TRUE)
+infection.risk1 <- project(infection.risk1, crs(ensemble.RSIIB1))
+
+infection.risk2 <- sum(temperature>0, na.rm = TRUE)
+infection.risk2 <- project(infection.risk2, crs(ensemble.RSIIB1))
+
+climate.temp1 <- rivers.climate^(0.75) * infection.risk1/12
+climate.temp2 <- rivers.climate^(0.75) * infection.risk2/12
+
+plot(countries, col = "grey5",  xaxt='n',  yaxt='n', axes=F, box=F, legend = F, border = NA, 
+     main = "# months with temperature tolerated by \nRalstonia solanacearum phylotype IIB1 (RSIIB1)")
+plot(oceans, col = "lightblue", border = NA, add = T)
+plot(infection.risk1, col=beauty.palette(100), xaxt = 'n', yaxt = 'n', axes = F, box = F, add = T, legend = T, 
+     plg = list(loc = "bottom", horizontal = TRUE, cex = 1.5))
+plot(lakes, col = "lightblue", border = NA, add = T)
+plot(countries, add = T, border = "grey50", lwd = 0.5)
+plot(vectorPresence, pch = 0, cex = 0.6, col = "grey45", add = TRUE)
+
+plot(countries, col = "grey5",  xaxt='n',  yaxt='n', axes=F, box=F, legend = F, border = NA, 
+     main = "Ralstonia solanacearum phylotype IIB1 (RSIIB1, n = 151)")
+plot(oceans, col = "lightblue", border = NA, add = T)
+plot(climate.temp1^(0.85), col=beauty.palette(100), xaxt = 'n', yaxt = 'n', axes = F, box = F, add = T, legend = T, 
+     plg = list(loc = "bottom", horizontal = TRUE, cex = 1.5))
+plot(lakes, col = "lightblue", border = NA, add = T)
+plot(countries, add = T, border = "grey50", lwd = 0.5)
+plot(vectorPresence, pch = 0, cex = 0.6, col = "grey35", add = TRUE)
+```
+
